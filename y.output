@@ -1,0 +1,302 @@
+   0  $accept : cmd_line $end
+
+   1  cmd_line : cmd_line separator COMMAND parameters
+   2           | EXIT
+   3           | JOBS
+   4           | COMMAND parameters
+   5           | cmd_line BACKGROUND
+   6           | cmd_line SEMICOLON
+   7           |
+   8           | error
+
+   9  separator : BACKGROUND
+  10            | PIPE_ERROR
+  11            | PIPE
+  12            | SEMICOLON
+
+  13  parameters : parameters OPTION
+  14             | parameters STRING
+  15             | parameters WORD
+  16             | parameters REDIRECT_IN FILENAME
+  17             | parameters REDIRECT_OUT FILENAME
+  18             | parameters REDIRECT_ERROR FILENAME
+  19             | parameters APPEND FILENAME
+  20             | parameters APPEND_ERROR FILENAME
+  21             |
+
+state 0
+	$accept : . cmd_line $end  (0)
+	cmd_line : .  (7)
+
+	error  shift 1
+	COMMAND  shift 2
+	EXIT  shift 3
+	JOBS  shift 4
+	$end  reduce 7
+	BACKGROUND  reduce 7
+	PIPE  reduce 7
+	PIPE_ERROR  reduce 7
+	SEMICOLON  reduce 7
+
+	cmd_line  goto 5
+
+
+state 1
+	cmd_line : error .  (8)
+
+	.  reduce 8
+
+
+state 2
+	cmd_line : COMMAND . parameters  (4)
+	parameters : .  (21)
+
+	.  reduce 21
+
+	parameters  goto 6
+
+
+state 3
+	cmd_line : EXIT .  (2)
+
+	.  reduce 2
+
+
+state 4
+	cmd_line : JOBS .  (3)
+
+	.  reduce 3
+
+
+state 5
+	$accept : cmd_line . $end  (0)
+	cmd_line : cmd_line . separator COMMAND parameters  (1)
+	cmd_line : cmd_line . BACKGROUND  (5)
+	cmd_line : cmd_line . SEMICOLON  (6)
+
+	$end  accept
+	BACKGROUND  shift 7
+	PIPE  shift 8
+	PIPE_ERROR  shift 9
+	SEMICOLON  shift 10
+	.  error
+
+	separator  goto 11
+
+
+state 6
+	cmd_line : COMMAND parameters .  (4)
+	parameters : parameters . OPTION  (13)
+	parameters : parameters . STRING  (14)
+	parameters : parameters . WORD  (15)
+	parameters : parameters . REDIRECT_IN FILENAME  (16)
+	parameters : parameters . REDIRECT_OUT FILENAME  (17)
+	parameters : parameters . REDIRECT_ERROR FILENAME  (18)
+	parameters : parameters . APPEND FILENAME  (19)
+	parameters : parameters . APPEND_ERROR FILENAME  (20)
+
+	WORD  shift 12
+	REDIRECT_IN  shift 13
+	REDIRECT_OUT  shift 14
+	REDIRECT_ERROR  shift 15
+	APPEND  shift 16
+	APPEND_ERROR  shift 17
+	OPTION  shift 18
+	STRING  shift 19
+	$end  reduce 4
+	BACKGROUND  reduce 4
+	PIPE  reduce 4
+	PIPE_ERROR  reduce 4
+	SEMICOLON  reduce 4
+
+
+state 7
+	cmd_line : cmd_line BACKGROUND .  (5)
+	separator : BACKGROUND .  (9)
+
+	$end  reduce 5
+	COMMAND  reduce 9
+	BACKGROUND  reduce 5
+	PIPE  reduce 5
+	PIPE_ERROR  reduce 5
+	SEMICOLON  reduce 5
+
+
+state 8
+	separator : PIPE .  (11)
+
+	.  reduce 11
+
+
+state 9
+	separator : PIPE_ERROR .  (10)
+
+	.  reduce 10
+
+
+state 10
+	cmd_line : cmd_line SEMICOLON .  (6)
+	separator : SEMICOLON .  (12)
+
+	$end  reduce 6
+	COMMAND  reduce 12
+	BACKGROUND  reduce 6
+	PIPE  reduce 6
+	PIPE_ERROR  reduce 6
+	SEMICOLON  reduce 6
+
+
+state 11
+	cmd_line : cmd_line separator . COMMAND parameters  (1)
+
+	COMMAND  shift 20
+	.  error
+
+
+state 12
+	parameters : parameters WORD .  (15)
+
+	.  reduce 15
+
+
+state 13
+	parameters : parameters REDIRECT_IN . FILENAME  (16)
+
+	FILENAME  shift 21
+	.  error
+
+
+state 14
+	parameters : parameters REDIRECT_OUT . FILENAME  (17)
+
+	FILENAME  shift 22
+	.  error
+
+
+state 15
+	parameters : parameters REDIRECT_ERROR . FILENAME  (18)
+
+	FILENAME  shift 23
+	.  error
+
+
+state 16
+	parameters : parameters APPEND . FILENAME  (19)
+
+	FILENAME  shift 24
+	.  error
+
+
+state 17
+	parameters : parameters APPEND_ERROR . FILENAME  (20)
+
+	FILENAME  shift 25
+	.  error
+
+
+state 18
+	parameters : parameters OPTION .  (13)
+
+	.  reduce 13
+
+
+state 19
+	parameters : parameters STRING .  (14)
+
+	.  reduce 14
+
+
+state 20
+	cmd_line : cmd_line separator COMMAND . parameters  (1)
+	parameters : .  (21)
+
+	.  reduce 21
+
+	parameters  goto 26
+
+
+state 21
+	parameters : parameters REDIRECT_IN FILENAME .  (16)
+
+	.  reduce 16
+
+
+state 22
+	parameters : parameters REDIRECT_OUT FILENAME .  (17)
+
+	.  reduce 17
+
+
+state 23
+	parameters : parameters REDIRECT_ERROR FILENAME .  (18)
+
+	.  reduce 18
+
+
+state 24
+	parameters : parameters APPEND FILENAME .  (19)
+
+	.  reduce 19
+
+
+state 25
+	parameters : parameters APPEND_ERROR FILENAME .  (20)
+
+	.  reduce 20
+
+
+state 26
+	cmd_line : cmd_line separator COMMAND parameters .  (1)
+	parameters : parameters . OPTION  (13)
+	parameters : parameters . STRING  (14)
+	parameters : parameters . WORD  (15)
+	parameters : parameters . REDIRECT_IN FILENAME  (16)
+	parameters : parameters . REDIRECT_OUT FILENAME  (17)
+	parameters : parameters . REDIRECT_ERROR FILENAME  (18)
+	parameters : parameters . APPEND FILENAME  (19)
+	parameters : parameters . APPEND_ERROR FILENAME  (20)
+
+	WORD  shift 12
+	REDIRECT_IN  shift 13
+	REDIRECT_OUT  shift 14
+	REDIRECT_ERROR  shift 15
+	APPEND  shift 16
+	APPEND_ERROR  shift 17
+	OPTION  shift 18
+	STRING  shift 19
+	$end  reduce 1
+	BACKGROUND  reduce 1
+	PIPE  reduce 1
+	PIPE_ERROR  reduce 1
+	SEMICOLON  reduce 1
+
+
+20 terminals, 4 nonterminals
+22 grammar rules, 27 states
+
+grammar parser grammar
+symbol# value# symbol
+     0      0  $end
+     1    256  error
+     2    257  WORD
+     3    258  COMMAND
+     4    259  FILENAME
+     5    260  BACKGROUND
+     6    261  PIPE
+     7    262  PIPE_ERROR
+     8    263  SEMICOLON
+     9    264  REDIRECT_IN
+    10    265  REDIRECT_OUT
+    11    266  REDIRECT_ERROR
+    12    267  APPEND
+    13    268  APPEND_ERROR
+    14    269  OPTION
+    15    270  STRING
+    16    271  LOGICAL_AND
+    17    272  LOGICAL_OR
+    18    273  EXIT
+    19    274  JOBS
+    20    275  $accept
+    21    276  cmd_line
+    22    277  separator
+    23    278  parameters

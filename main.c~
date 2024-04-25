@@ -1,0 +1,939 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <signal.h>
+#include <libgen.h>
+#include <limits.h>
+#include <fcntl.h>
+#include <stdbool.h>
+#include "y.tab.h" 
+#include "lex.yy.h" 
+//#include "lex.yy.h"    
+
+#define MAX_LINE_LENGTH 1024
+#define MAX_LINE_LENGTH 1024
+#define MAX_ARGS 64
+#define MAX_JOBS 64
+#define MAX_SEPERATOR 10
+#define MAX_COMMAND_LENGTH 100
+//#define MAX_ARGS 100
+#define MAX_COMMANDS 100
+#define MAX_ENV_VARIABLES 100
+
+typedef struct{
+  char  *command ;
+  char *args[MAX_ARGS];
+}Command;
+Command commands[MAX_COMMANDS];
+
+typedef struct {
+    char name[256];
+    char value[256];
+} EnvironmentVariable;
+EnvironmentVariable custom_env[MAX_ENV_VARIABLES];
+int num_custom_env = 0;
+
+typedef enum job_status
+{
+    JOB_RUNNING = 0,
+    JOB_STOPPED = 1,
+    JOB_DONE = 2,
+    JOB_UNKNOWN = 3
+}job_status_t;
+
+typedef struct Job {
+    pid_t pid;
+    int num;
+    char command[MAX_COMMAND_LENGTH];
+    job_status_t status;
+} Job_t;
+
+Job_t running_jobs[MAX_JOBS];
+int numJobs = 0;
+int fg_jobs = -1;
+pid_t shell_pgid;
+struct termios ish_tmodes;
+
+char* cmd[100];
+int cmd_index = 1;
+int pipe_1 = 0;
+int redirect_in = 0;
+int redirect_out = 0;
+int redirect_error = 0;
+int redirect_append = 0;
+int redirect_append_error = 0;
+char* ri;
+char* ro;
+char* re;
+char* ra;
+char* rae;
+bool isBackground = false;
+bool seperator = false;
+int seperator_arr[MAX_SEPERATOR];
+int sep_count = 0;
+bool execute_command = false;
+int ish;
+pid_t ish_pgid;
+int cmd_count = 0;
+int arg_count = 1;
+
+//Adding commands after separator to the array
+void add_command_seperator(char* command){
+  seperator = true;
+  execute_command = false;
+  if (cmd_count < MAX_COMMANDS) {
+        commands[cmd_count].command = command;
+        // printf("Added command %d: %s\n", cmd_count, command);                                                     
+        cmd_count++;
+        arg_count = 1;
+    } else {
+        printf("Max command limit reached\n");
+    }
+
+}
+
+void add_pipe(){
+  //printf("Found Pipe\n");
+  seperator_arr[sep_count] = 1;
+  sep_count++;
+}
+
+void add_semicolon(){
+  seperator_arr[sep_count] = 0;
+  sep_count++;
+}
+
+void add_background(){
+  seperator_arr[sep_count] = 2;
+  sep_count++;
+}
+
+//setting environment variable
+void execute_setenv(const char *name, const char *value)
+{
+   if (num_custom_env < MAX_ENV_VARIABLES)
+     {
+     if (name == NULL)
+       {
+          for (int i = 0; i < num_custom_env; i++)
+          {
+            printf("%s=%s\n", custom_env[i].name, custom_env[i].value);
+          }
+       }
+     else if (value == NULL)
+       {
+         strncpy(custom_env[num_custom_env].name, name, sizeof(custom_env[num_custom_env].name) - 1);
+         strncpy(custom_env[num_custom_env].value, "", sizeof(custom_env[num_custom_env].value) - 1);
+         num_custom_env++;
+       }
+     else
+       {
+        strncpy(custom_env[num_custom_env].name, name, sizeof(custom_env[num_custom_env].name) - 1);
+        strncpy(custom_env[num_custom_env].value, value, sizeof(custom_env[num_custom_env].value) - 1);
+        num_custom_env++;
+       }
+       }
+   else {
+        fprintf(stderr, "Maximum number of environment variables reached.\n");
+    }
+}
+
+//Initializing ish by reading .ishrc file and setting the default PATH variable
+void initialize()
+{
+    FILE *fp = fopen(".ishrc", "r");
+    if (fp == NULL)
+    {
+      perror("Error opening .ishrc file");
+      return;
+    }
+    fseek(fp, 0, SEEK_SET);
+    char* line2[250];
+    while (fgets(line2, sizeof(line2), fp) != NULL)
+    {
+      if (strncmp(line2, "export PATH=", 12) == 0) 
+      {
+        char *path_start = strstr(line2, "export PATH=");  
+        char* path_value = path_start + strlen("export PATH=");
+        char *newline = strchr(path_value, '\n');
+        if (newline != NULL) 
+        {
+            *newline = '\0';
+        }
+        execute_setenv("PATH", path_value);
+        printf("Custom PATH set to: %s from .ishrc file\n", path_value);
+        break; 
+      }
+     } 
+     //Executing the commands from .ishrc file  
+    char line[MAX_LINE_LENGTH];
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+      if (system(line) == -1)
+        {
+          perror("Error executing command from .ishrc");
+          exit(EXIT_FAILURE);
+        }
+    }
+  fclose(fp);
+}
+
+//Changing Directories
+void execute_cd() {
+  if (commands[0].args[1]  == NULL)
+  {
+    char *home_dir = getenv("HOME");
+    if (home_dir != NULL) 
+    {
+	    chdir(home_dir);
+    }
+    else
+	  {
+	    printf("Error: HOME environment variable not set\n");
+    }
+  }
+  else
+  {
+    if (chdir(commands[0].args[1]) != 0) 
+    {
+      perror("chdir");
+    }
+  }
+}
+
+//Deletes environment variables
+void execute_unsetenv(){
+ for (int i = 0; i < num_custom_env; i++) {
+        if (strcmp(custom_env[i].name, commands[0].args[1]) == 0) {
+            custom_env[i] = custom_env[num_custom_env - 1];
+            num_custom_env--;
+            return;
+        }
+    }
+    fprintf(stderr, "Environment variable not found: %s\n", cmd[1]);
+}
+
+//Finding commands in PATH definition
+char *find_command(const char *cmd) {
+    char *path_value = NULL;
+    // Finding the PATH variable in custom_env
+    for (int i = 0; i < num_custom_env; i++) {
+        if (strcmp(custom_env[i].name, "PATH") == 0) {
+            path_value = custom_env[i].value;
+            break;
+        }
+    }
+    if (path_value == NULL) {
+        fprintf(stderr, "PATH environment variable is not set in custom_env\n");
+        return NULL;
+    }
+    // Tokenizing PATH variable by colon
+    char *path_token = strtok(path_value, ":");
+    while (path_token != NULL)
+      {
+        // Constructing the full path of the command
+        char cmd_path[MAX_LINE_LENGTH];
+        snprintf(cmd_path, MAX_LINE_LENGTH, "%s/%s", path_token, cmd);
+
+        // Checking if the command exists at the constructed path
+        if (access(cmd_path, X_OK) == 0) {
+            return strdup(cmd_path);
+        }
+        // Moving to the next directory in PATH
+        path_token = strtok(NULL, ":");
+    }
+    fprintf(stderr, "Command '%s' not found in custom_env PATH directories\n", cmd);
+    return NULL;
+}
+
+//Implementing KILL 
+void execute_kill(char* input)
+{
+  char *endptr;
+  if (input[0] == '%') {
+    int job_id = (int) strtol(input + 1, &endptr, 10);
+    for (int i = 0; i < MAX_JOBS; i++) 
+    {
+      if (running_jobs[i].num == job_id) 
+      {
+        pid_t job_pid = running_jobs[i].pid;
+        kill(job_pid, SIGTERM);
+        sleep(1);
+        kill(job_pid, SIGKILL);
+        running_jobs[i].status = 4;
+        break;
+      }
+  }
+  } else {
+    pid_t job_pid = (pid_t) strtol(input, &endptr, 10);
+    //printf("Bringing process %d to foreground...\n", job_pid);                                                 
+    for (int i = 0; i < MAX_JOBS; i++) 
+    {
+      if (running_jobs[i].pid == job_pid) 
+      {
+        //      printf("Found PID\n");
+        kill(job_pid, SIGTERM);
+        sleep(1);
+        kill(job_pid, SIGKILL);
+        running_jobs[i].status = 4;
+        break;
+      }
+    }
+  }
+}
+
+//Setting jobs to background
+void execute_bg(char* input){
+  char *endptr;
+  //using job number
+  if (input[0] == '%') 
+  {
+    int job_id = (int) strtol(input + 1, &endptr, 10);
+    //printf("Bringing job %d to foreground...\n", job_id);                                              
+    for (int i = 0; i < MAX_JOBS; i++) 
+    {
+      if (running_jobs[i].num == job_id) 
+      {
+        pid_t job_pid = running_jobs[i].pid;
+        kill(job_pid, SIGCONT);  
+        running_jobs[i].status = 0;
+        break;
+      }
+    } 
+  } else //Using PID
+  {
+    pid_t job_pid = (pid_t) strtol(input, &endptr, 10);
+    //printf("Bringing process %d to foreground...\n", job_pid);                                                
+    for (int i = 0; i < MAX_JOBS; i++) 
+    {
+      if (running_jobs[i].pid == job_pid) 
+      {
+        //      printf("Found PID\n");                                                                            
+        kill(job_pid, SIGCONT);
+        running_jobs[i].status = 0;
+        break;
+
+      }
+    }
+  }
+}
+
+//Executing foreground job
+void execute_fg(char* input)
+{
+   if (input == NULL)
+  {
+    printf("Error: No job ID provided.\n");
+    return;
+  }
+  char *endptr;
+  if (input[0] == '%') 
+  {
+    int job_id = (int) strtol(input + 1, &endptr, 10);
+    //printf("Bringing job %d to foreground...\n", job_id);
+    for (int i = 0; i < MAX_JOBS; i++) 
+    {
+      if (running_jobs[i].num == job_id) 
+      {
+        pid_t job_pid = running_jobs[i].pid;
+        tcsetpgrp(ish, job_pid);
+        kill(job_pid, SIGCONT);
+        waitpid(job_pid, NULL, WUNTRACED);
+        tcsetpgrp(ish, ish_pgid);
+        running_jobs[i].status = 0;
+        break;
+      }
+  }
+	//	printf("DONE\n");
+    } 
+    else
+    {
+      pid_t job_pid = (pid_t) strtol(input, &endptr, 10);
+        //printf("Bringing process %d to foreground...\n", job_pid);
+     for (int i = 0; i < MAX_JOBS; i++) 
+     {
+        if (running_jobs[i].pid == job_pid) 
+        {
+          //	  printf("Found PID\n");
+          tcsetpgrp(ish, job_pid);
+            kill(job_pid, SIGCONT);
+            waitpid(job_pid, NULL, WUNTRACED);
+            tcsetpgrp(ish, ish_pgid);
+            running_jobs[i].status = 0;
+            break;
+        }
+	    }
+    }
+}
+
+// Function to update the status of a job
+void update_job_status(Job_t *job) {
+    int status;
+    pid_t pid = waitpid(job->pid, &status, WNOHANG | WUNTRACED | WCONTINUED);
+    if (pid > 0) {
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            job->status = JOB_DONE;
+        } else if (WIFSTOPPED(status)) {
+            job->status = JOB_STOPPED;
+        } else if (WIFCONTINUED(status)) {
+            job->status = JOB_RUNNING;
+        }
+    } else if (pid == -1) {
+        perror("waitpid");
+        job->status = JOB_DONE;
+    }
+}
+
+// Function to update status of all running jobs
+void update_jobs() {
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (running_jobs[i].status == JOB_RUNNING || running_jobs[i].status == JOB_STOPPED) {
+            update_job_status(&running_jobs[i]);
+        }
+    }
+}
+
+void jobs() {
+  //printf("Inside job \n");
+    update_jobs();
+    //printf("Back inside jobs\n");
+    for (int i = 0; i < MAX_JOBS; i++) {
+      //      printf("Checking job %d\n", i); 
+        if (running_jobs[i].status < JOB_DONE) {
+            if (running_jobs[i].command != NULL) {
+                printf("[%d] %d %s %s\n", running_jobs[i].num, running_jobs[i].pid,
+                       running_jobs[i].status == JOB_RUNNING ? "Running" : "Stopped",
+                       running_jobs[i].command);
+            }
+        } else if (running_jobs[i].status == JOB_DONE) {
+            printf("[%d] %d %s %s\n", running_jobs[i].num, running_jobs[i].pid,
+                   "Done", running_jobs[i].command);
+        }
+    }
+    //    printf("Out of function\n");
+}
+
+void execute_external_command(char *command, char **arguments) 
+{
+  
+  if (strcmp(command, "cd") == 0)
+    {
+      execute_cd();
+      return;
+    }
+
+  if (strcmp(command, "setenv") == 0) {
+    execute_setenv(commands[0].args[1], commands[0].args[2]);
+        return 0;
+    }
+
+  if (strcmp(command, "unsetenv") == 0) {
+        execute_unsetenv();
+        return 0;
+    }
+
+  if (strcmp(command, "fg") == 0) {
+    //printf("Executing fg \n");
+    execute_fg(commands[0].args[1]);
+        return 0;
+    }
+
+  if (strcmp(command, "bg") == 0) {
+    //printf("Executing bg \n");
+    execute_bg(commands[0].args[1]);
+        return 0;
+    }
+
+   if (strcmp(command, "kill") == 0) {
+    //printf("Executing bg \n");                                                                                     
+    execute_kill(commands[0].args[1]);
+        return 0;
+    }
+  
+  arguments[0] = command;  
+  pid_t pid = fork();
+  int status;
+  if (pid == -1) 
+  {
+    perror("fork");
+    exit(EXIT_FAILURE);
+  } 
+  else if (pid == 0)
+  {
+    //Setting up signals to Default
+    //signal(SIGTSTP, SIG_DFL);
+     signal(SIGTTOU, SIG_DFL);
+     signal(SIGQUIT, SIG_DFL); 
+     signal(SIGTSTP, SIG_DFL);
+    //REDIRECT_IN 
+    if (redirect_in == 1)
+    {
+      int fd_in = open(ri, 'r');
+        if (dup2(fd_in, STDIN_FILENO) == -1) 
+        {
+          perror("dup2");
+          exit(EXIT_FAILURE);
+        }
+    }
+
+    //REDIRECT_OUT
+    if (redirect_out == 1)
+    {
+      int fd_out = -1;
+      if (ro != NULL) 
+      {
+        // Open file for output redirection
+        fd_out = open(ro, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd_out == -1) 
+        {
+          perror("open");
+          exit(EXIT_FAILURE);
+        }
+      }
+      if (fd_out != -1) 
+      {
+        dup2(fd_out, STDOUT_FILENO);
+        close(fd_out);
+        }
+    }
+
+    //REDIRECT_ERROR
+    if (redirect_error == 1)
+    {
+      int fd_error = -1;
+      if (re != NULL) 
+      {
+        fd_error = open(re, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+          if (fd_error == -1) 
+          {
+            perror("open");
+            exit(EXIT_FAILURE);
+          }
+      }
+      if (fd_error != -1) 
+      {
+        dup2(fd_error, STDOUT_FILENO);
+        dup2(fd_error, STDERR_FILENO);
+        close(fd_error);
+      }
+    }
+
+    //REDIRECT_APPEND
+    if (redirect_append == 1)
+    {
+      int fd_app = -1;
+      if (ra != NULL) 
+      {
+        fd_app = open(ra, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (fd_app == -1) 
+        {
+          perror("open");
+          exit(EXIT_FAILURE);
+        }
+      }
+      if (fd_app != -1) 
+      {
+        dup2(fd_app, STDOUT_FILENO);
+        close(fd_app);
+      }
+    }
+
+      //REDIRECT_APPEND_ERROR                                                                                                                                                                                                                       
+    if (redirect_append_error == 1)
+    {
+      int fd_apperr = -1;
+      if (rae != NULL) 
+      {
+        fd_apperr = open(rae, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (fd_apperr == -1) 
+        {
+          perror("open");
+          exit(EXIT_FAILURE);
+        }
+      }
+      if (fd_apperr != -1) 
+      {
+        dup2(fd_apperr, STDOUT_FILENO);
+        dup2(fd_apperr, STDERR_FILENO);
+        close(fd_apperr);
+      }
+    }
+    setpgid(0, 0); // Setting the process group ID                                                          
+    if (!isBackground) 
+    {
+      tcsetpgrp(ish, getpid());
+    }
+    
+    //Setting Full path for the command
+    char *full_cmd_path = find_command(command);
+    if (full_cmd_path == NULL) {
+        exit(EXIT_FAILURE);
+    }
+    arguments[0] = full_cmd_path;
+
+    //Debug
+    //for (int i = 1; arguments[i] != NULL; i++)
+    //{      
+    //printf("%s\n", arguments[i]);
+    //}
+    
+    char *envp[MAX_ENV_VARIABLES + 1]; // Array of pointers to strings representing environment variables
+
+    // Constructing envp array from custom environment variables
+    for (int i = 0; i < num_custom_env; i++) 
+    {
+      char *env_var = malloc(MAX_LINE_LENGTH);
+      snprintf(env_var, MAX_LINE_LENGTH, "%s=%s", custom_env[i].name, custom_env[i].value);
+      envp[i] = env_var;
+    }
+    envp[num_custom_env] = NULL; // Terminating envp array with NULL
+
+    // Executing the command
+    if (execve(full_cmd_path, arguments, envp) == -1) 
+    {
+      perror("execve");
+      exit(EXIT_FAILURE);
+    }
+    //execvp(command, cmd);
+    //perror("execvp");
+    //exit(EXIT_FAILURE);
+  } else 
+  {
+    setpgid(pid, pid);
+    Job_t job;
+    job.pid = pid;
+    job.num = numJobs + 1;
+    strcpy(job.command, command);
+    for (int i = 1; arguments[i] != NULL; i++) 
+    {
+      strcat(job.command, " "); 
+      strcat(job.command, arguments[i]);
+    }
+    job.status = 0;
+    if (WIFSTOPPED(status)) {
+            printf("Child process stopped by signal\n");
+        }
+    running_jobs[numJobs++] = job;   
+    if (isBackground) 
+    {
+      printf("[%d] %d\n", numJobs, pid); 
+      //      printf("Job should be in background.\n");
+    }
+    else
+    {
+    
+      fg_jobs = numJobs - 1;
+      tcsetpgrp(ish, pid);
+      //      int status;
+      waitpid(pid, status, WUNTRACED);
+      tcsetpgrp(ish, ish_pgid);
+    }
+  }
+}
+
+void put_background()
+{
+  isBackground = true;
+}
+
+void print_cwd() {
+  char cwd[1024];
+  if (getcwd(cwd, sizeof(cwd)) != NULL) 
+  {
+    char *last_slash = strrchr(cwd, '/');
+    if (last_slash != NULL) 
+    {
+      // Printing the directory name after the last slash                                                                                                                                                                                  
+      printf("%s%% ", last_slash + 1);
+    } else 
+    {
+      // Print the entire cwd if no slash found                                                                                                                                                                                         
+      printf("%s%% ", cwd);
+    }
+  } 
+  else 
+  {
+      perror("getcwd");
+  }
+}
+
+
+void execute_redirect_in(char *filename) 
+{
+  redirect_in = 1;
+  ri = filename;
+}
+
+void execute_redirect_out(char *filename) 
+{
+  redirect_out = 1;
+  ro = filename;
+}
+
+void execute_redirect_error(char *filename) 
+{
+  redirect_error = 1;
+  re = filename;
+}
+
+void execute_redirect_append(char *filename) 
+{
+  redirect_append = 1;
+  ra = filename;
+}
+
+void execute_redirect_append_error(char *filename) 
+{
+  redirect_append_error = 1;
+  rae = filename;
+}
+
+void add_args(char* arg) {
+    // Adding the argument to the current command's arguments array
+    commands[cmd_count].args[arg_count] = arg;
+    arg_count++;
+    //printf("Added argument to command %d, %d: %s\n", cmd_count, arg_count, arg);
+}
+
+void add_command(char* command) 
+{
+  execute_command = true;
+  if (cmd_count < MAX_COMMANDS) 
+  {
+    commands[cmd_count].command = command;
+    //printf("Added command %d: %s\n", cmd_count, command);
+    cmd_count++;
+    arg_count = 1;
+    } else 
+    {
+      printf("Max command limit reached\n");
+    }
+}
+
+void reset_commands() {
+  cmd_count = 0;
+  arg_count = 1;
+  //printf("Command and argument counts reset\n");
+  for (int i = 0; i < MAX_COMMANDS; i++) 
+  {
+    commands[i].command = NULL;
+    for (int j = 0; j < MAX_ARGS; j++) 
+    {
+      commands[i].args[j] = NULL;
+    }
+  }
+  // printf("Commands array reset\n");
+  redirect_in = 0;
+  redirect_out = 0;
+  redirect_error = 0;
+  redirect_append = 0;
+  redirect_append_error = 0;
+  isBackground = false;
+  execute_command = false;
+  for (int i = 0; i < MAX_SEPERATOR; i++) {
+        seperator_arr[i] = -1;
+    }
+  seperator = false;
+    sep_count = 0;
+}
+ 
+void execute_exit() {
+    printf("Exiting shell...\n");
+    exit(EXIT_SUCCESS);
+}
+
+void found_seperator()
+{
+  seperator = true;
+}
+
+void execute_multiple_pipes(Command *cmds, int pipe_count)
+{
+  int prev_pipe;
+  int pfds[2];
+  int status;
+    pid_t pid;
+    prev_pipe = STDIN_FILENO;
+
+    for (int i = 0; i < pipe_count; i++) {
+        if (i < pipe_count - 1) {
+            pipe(pfds);
+        }
+        pid = fork();
+        if (pid == 0) {
+            // Redirecting previous pipe to stdin
+            if (prev_pipe != STDIN_FILENO) {
+                dup2(prev_pipe, STDIN_FILENO);
+                close(prev_pipe);
+            }
+            // Redirecting stdout to current pipe
+            if (i < pipe_count - 1) {
+                dup2(pfds[1], STDOUT_FILENO);
+                close(pfds[1]);
+                close(pfds[0]);
+            }
+	    if (isBackground) {
+                setpgid(0, 0);
+            }
+
+//Setting Full path for the command                                                                                                                                                                                                       
+    char *full_cmd_path = find_command(cmds[i].command);
+    if (full_cmd_path == NULL) {
+        exit(EXIT_FAILURE);
+    }
+    cmds[i].args[0] = full_cmd_path;
+ 
+
+    char *envp[MAX_ENV_VARIABLES + 1]; // Array of pointers to strings representing environment variables                                                                                                                                     
+
+    // Constructing envp array from custom environment variables                                                                                                                                                                              
+    for (int i = 0; i < num_custom_env; i++)
+    {
+      char *env_var = malloc(MAX_LINE_LENGTH);
+      snprintf(env_var, MAX_LINE_LENGTH, "%s=%s", custom_env[i].name, custom_env[i].value);
+      envp[i] = env_var;
+    }
+    envp[num_custom_env] = NULL; // Terminating envp array with NULL                                                                                                                                                                          
+
+    // Executing the command                                                                                                                                                                                                                  
+    if (execve(full_cmd_path,  cmds[i].args, envp) == -1)
+    {
+      perror("execve");
+      exit(EXIT_FAILURE);
+    }
+
+
+        } else if (pid < 0) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        }
+
+        // Close read end of previous pipe (not needed in the parent)
+        if (prev_pipe != STDIN_FILENO) {
+            close(prev_pipe);
+        }
+        // Close write end of current pipe (not needed in the parent)
+        if (i < pipe_count - 1) {
+            close(pfds[1]);
+            // Save read end of current pipe to use in next iteration
+            prev_pipe = pfds[0];
+        }
+    }    
+    // Wait for all child processes to finish
+    if (!isBackground) {
+      for (int i = 0; i < pipe_count; i++) {
+          wait(&status);
+      }
+    }  
+
+}
+
+
+int main() {
+  ish = STDIN_FILENO;
+  signal(SIGINT, SIG_IGN);
+  signal(SIGQUIT, SIG_IGN);
+  signal(SIGTSTP, SIG_IGN); 
+  signal(SIGTTOU, SIG_IGN);
+  ish_pgid = getpid();
+  setpgid( ish_pgid,  ish_pgid);
+  tcsetpgrp( ish,  ish_pgid);
+  tcgetattr( ish, &ish_tmodes);
+  for (int i = 0; i < MAX_JOBS; i++) {
+    running_jobs[i].status = JOB_UNKNOWN;
+  }
+   for (int i = 0; i < MAX_SEPERATOR; i++) {
+    seperator_arr[i] = -1;
+  }
+
+   for (int i = 0; i < MAX_COMMANDS; i++) {
+        commands[i].command = NULL;
+        for (int j = 0; j < MAX_ARGS; j++) {
+            commands[i].args[j] = NULL;
+        }
+        commands[i].args[MAX_ARGS] = NULL;
+    }
+   
+  //Reading .ishrc file
+  initialize();                                                                                                                              
+  // Main shell loop
+  while (1) 
+  {
+    // Interactive operation: prompt with hostname%
+    char hostname[256];
+    gethostname(hostname, sizeof(hostname));
+    printf("%s ", hostname);
+    print_cwd();
+	  if(! yyparse())
+	  { 
+	    if(!seperator)
+	    {
+      //printf("We ready to execute \n");
+
+		  if(execute_command)
+      {
+		    execute_external_command(commands[0].command, commands[0].args);
+		  }
+	    }
+	    else
+	    {
+
+	      //printf("separator_arr: ");
+//for (int i = 0; seperator_arr[i] != -1; i++) {
+  // printf("%d ", seperator_arr[i]);
+    //}
+//printf("\n");
+	int s = 0;
+        for (int i = 0; i < cmd_count; i++) {
+	  //  printf("executing command %d, k = %d\n",i,k);
+    if (seperator_arr[s] == 0 || seperator_arr[s] == NULL) {
+      //printf("Executed colon\n");
+        execute_external_command(commands[i].command, commands[i].args);
+	s++;
+    } else if (seperator_arr[s] == 1) {
+      //printf("Inside pipe i: %d\n", i);
+        int pipe_count = 1;
+        while (i + pipe_count < cmd_count && seperator_arr[s + pipe_count] == 1) {
+            pipe_count++;
+        }
+        int cmd_num = pipe_count + 1;
+        Command cmd[cmd_num];
+
+	for (int i = 0; i < cmd_num; i++) {
+        cmd[i].command = NULL;
+        for (int j = 0; j < MAX_ARGS; j++) {
+            cmd[i].args[j] = NULL;
+        }
+        cmd[i].args[MAX_ARGS] = NULL;
+    }
+	
+        int cmd_index = 0;
+        for (int j = i; j < i + cmd_num; j++)
+	  {
+	    //printf("Adding Command\n");
+            cmd[cmd_index].command = commands[j].command;
+	    cmd[cmd_index].args[0] = commands[j].command;
+            for (int k = 1; k < MAX_ARGS && commands[j].args[k] != NULL; k++) {
+	      //	      printf("Adding arg: %s\n", commands[j].args[k]);
+	      cmd[cmd_index].args[k] = commands[j].args[k];
+            }
+            cmd_index++;
+        }
+        execute_multiple_pipes(cmd, cmd_num);
+        i += pipe_count;
+	s+= pipe_count;
+    }
+}
+
+	    }
+	  }
+	  reset_commands();
+  }
+  return 0;
+}

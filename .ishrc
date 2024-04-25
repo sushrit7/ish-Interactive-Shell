@@ -1,0 +1,11 @@
+# Environment variables
+export PATH=/bin
+
+
+# Welcome message
+echo "Welcome to ish "
+
+
+
+
+
